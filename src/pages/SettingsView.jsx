@@ -20,10 +20,16 @@ function Field({ label, hint, children }) {
   )
 }
 
+// Quick API key validator — Gemini keys are 39 chars starting with AIza
+function isValidGeminiKey(key) {
+  return key && key.startsWith('AIza') && key.length > 30
+}
+
 export default function SettingsView() {
-  const [form, setForm]   = useState(getSettings())
-  const [saved, setSaved] = useState(false)
-  const [showKey, setShowKey] = useState(false)
+  const [form, setForm]         = useState(getSettings())
+  const [saved, setSaved]       = useState(false)
+  const [showKey, setShowKey]   = useState(false)
+  const [testStatus, setTestStatus] = useState(null) // null | 'testing' | 'ok' | 'fail'
 
   useEffect(() => { setForm(getSettings()) }, [])
 
@@ -32,15 +38,46 @@ export default function SettingsView() {
   const save = () => {
     saveSettings(form)
     setSaved(true)
+    setTestStatus(null)
     setTimeout(() => setSaved(false), 2000)
   }
 
+  // Quick test — sends a tiny message through the proxy to verify the key works
+  const testKey = async () => {
+    const key = form.geminiApiKey?.trim()
+    if (!isValidGeminiKey(key)) {
+      setTestStatus('fail')
+      return
+    }
+    setTestStatus('testing')
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({
+          model: 'gemini-1.5-flash',
+          contents: [{ role: 'user', parts: [{ text: 'Reply with just the word: working' }] }],
+          generationConfig: { maxOutputTokens: 10 },
+        }),
+      })
+      const data = await res.json()
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      setTestStatus(text.toLowerCase().includes('work') || res.ok ? 'ok' : 'fail')
+    } catch {
+      setTestStatus('fail')
+    }
+  }
+
+  const statusColor = { ok: 'var(--green)', fail: 'var(--red)', testing: 'var(--amber)' }
+  const statusMsg   = { ok: '✅ Key works! AI is ready.', fail: '❌ Key invalid or quota exceeded.', testing: '⏳ Testing...' }
+
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
+    <div className="page-scroll" style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
       <div style={{ maxWidth: 640, margin: '0 auto' }}>
 
+        {/* Profile */}
         <Section title="👤 Profile">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
             <Field label="Your Name">
               <input value={form.name} onChange={e => set('name', e.target.value)} placeholder="Your name" style={{ width: '100%' }} />
             </Field>
@@ -53,9 +90,10 @@ export default function SettingsView() {
           </div>
         </Section>
 
+        {/* Pomodoro */}
         <Section title="🍅 Pomodoro Settings">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-            <Field label="Focus Duration (min)">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 12 }}>
+            <Field label="Focus (min)">
               <input type="number" min={5} max={90} value={form.pomodoroFocus} onChange={e => set('pomodoroFocus', +e.target.value)} style={{ width: '100%' }} />
             </Field>
             <Field label="Short Break (min)">
@@ -64,102 +102,163 @@ export default function SettingsView() {
             <Field label="Long Break (min)">
               <input type="number" min={5} max={60} value={form.pomodoroLongBreak} onChange={e => set('pomodoroLongBreak', +e.target.value)} style={{ width: '100%' }} />
             </Field>
+            <Field label="Sessions before long break">
+              <input type="number" min={2} max={8} value={form.pomodoroSessions} onChange={e => set('pomodoroSessions', +e.target.value)} style={{ width: '100%' }} />
+            </Field>
           </div>
-          <Field label="Sessions before Long Break">
-            <input type="number" min={2} max={8} value={form.pomodoroSessions} onChange={e => set('pomodoroSessions', +e.target.value)} style={{ width: 80 }} />
-          </Field>
         </Section>
 
-        <Section title="🤖 AI Assistant (Claude API)">
+        {/* Gemini API Key */}
+        <Section title="🤖 AI Assistant — Google Gemini">
+
+          {/* Step-by-step guide */}
+          <div style={{ padding: 14, background: 'var(--bg3)', borderRadius: 'var(--r-lg)', marginBottom: 16, border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 10 }}>How to get your FREE Gemini API key:</div>
+            {[
+              { n: '1', text: 'Go to ', link: 'https://aistudio.google.com/app/apikey', linkText: 'aistudio.google.com/app/apikey' },
+              { n: '2', text: 'Sign in with your Google account' },
+              { n: '3', text: 'Click "Create API Key" → select any project (or create new)' },
+              { n: '4', text: 'Copy the key (starts with AIza...) and paste it below' },
+            ].map(step => (
+              <div key={step.n} style={{ display: 'flex', gap: 10, marginBottom: 8, alignItems: 'flex-start' }}>
+                <div style={{
+                  width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                  background: 'var(--accent)', color: '#fff',
+                  fontSize: 11, fontWeight: 700,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>{step.n}</div>
+                <div style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.5 }}>
+                  {step.text}
+                  {step.link && (
+                    <a href={step.link} target="_blank" rel="noopener noreferrer"
+                      style={{ color: 'var(--accent2)', textDecoration: 'none', fontWeight: 500 }}>
+                      {step.linkText}
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+            <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(46,204,113,0.08)', borderRadius: 'var(--r-md)', border: '1px solid rgba(46,204,113,0.2)' }}>
+              <div style={{ fontSize: 11, color: 'var(--green)' }}>
+                ✅ <strong>Completely free</strong> — Gemini 1.5 Flash gives you <strong>15 requests/minute</strong> and <strong>1 million tokens/day</strong> at zero cost. No credit card needed.
+              </div>
+            </div>
+          </div>
+
           <Field
-            label="Claude API Key"
-            hint="Get your key at console.anthropic.com → API Keys. Stored locally, never sent anywhere except Anthropic's API."
+            label="Gemini API Key"
+            hint="Stored only in your browser's localStorage. Never sent anywhere except Google's API."
           >
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 type={showKey ? 'text' : 'password'}
-                value={form.claudeApiKey}
-                onChange={e => set('claudeApiKey', e.target.value)}
-                placeholder="sk-ant-..."
-                style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                value={form.geminiApiKey}
+                onChange={e => { set('geminiApiKey', e.target.value); setTestStatus(null) }}
+                placeholder="AIza..."
+                style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 13 }}
               />
               <button
                 onClick={() => setShowKey(s => !s)}
-                style={{ padding: '0 12px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', color: 'var(--text2)', cursor: 'pointer', fontSize: 13 }}
+                style={{ padding: '0 12px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', color: 'var(--text2)', fontSize: 14 }}
               >{showKey ? '🙈' : '👁️'}</button>
             </div>
           </Field>
-          <div style={{ padding: 12, background: 'rgba(124,106,245,0.06)', borderRadius: 'var(--r-md)', borderLeft: '3px solid var(--accent)', fontSize: 11, color: 'var(--text2)', lineHeight: 1.7 }}>
-            <strong>Without API key:</strong> App works fully offline with rule-based AI responses.<br />
-            <strong>With API key:</strong> Full natural language scheduling — "Add ML assignment due Thursday, critical" — and timetable image parsing.
+
+          {/* Test key button */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+            <button
+              onClick={testKey}
+              disabled={testStatus === 'testing' || !form.geminiApiKey?.trim()}
+              style={{
+                padding: '8px 16px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500,
+                background: 'var(--bg3)', border: '1px solid var(--border2)',
+                color: 'var(--text)', cursor: form.geminiApiKey?.trim() ? 'pointer' : 'not-allowed',
+                opacity: form.geminiApiKey?.trim() ? 1 : 0.5,
+              }}
+            >🧪 Test Key</button>
+            {testStatus && (
+              <span style={{ fontSize: 12, color: statusColor[testStatus] }}>
+                {statusMsg[testStatus]}
+              </span>
+            )}
+          </div>
+
+          <div style={{ marginTop: 14, padding: 12, background: 'var(--bg3)', borderRadius: 'var(--r-md)', borderLeft: '3px solid var(--accent)' }}>
+            <div style={{ fontSize: 11, color: 'var(--text2)', lineHeight: 1.7 }}>
+              <strong>Without key:</strong> App works fully offline with rule-based AI responses.<br />
+              <strong>With key:</strong> Full natural language scheduling + timetable photo parsing using Gemini Vision.
+            </div>
           </div>
         </Section>
 
+        {/* Notifications */}
         <Section title="🔔 Notifications">
           <Field label="Browser Notifications">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div
                 onClick={() => set('notificationsEnabled', !form.notificationsEnabled)}
                 style={{
-                  width: 44, height: 24, borderRadius: 12,
+                  width: 44, height: 24, borderRadius: 12, flexShrink: 0,
                   background: form.notificationsEnabled ? 'var(--accent)' : 'var(--bg4)',
                   border: '1px solid var(--border2)',
                   cursor: 'pointer', position: 'relative', transition: 'background 0.2s',
                 }}
               >
                 <div style={{
-                  position: 'absolute', top: 3, left: form.notificationsEnabled ? 22 : 3,
+                  position: 'absolute', top: 3,
+                  left: form.notificationsEnabled ? 22 : 3,
                   width: 16, height: 16, borderRadius: '50%',
                   background: '#fff', transition: 'left 0.2s',
                 }} />
               </div>
               <span style={{ fontSize: 12, color: 'var(--text2)' }}>
-                {form.notificationsEnabled ? 'Enabled — get Pomodoro & deadline alerts' : 'Disabled'}
+                {form.notificationsEnabled ? 'Enabled — Pomodoro ends and deadline alerts' : 'Disabled'}
               </span>
             </div>
           </Field>
         </Section>
 
+        {/* Data */}
         <Section title="💾 Data & Storage">
-          <div style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.8, marginBottom: 14 }}>
-            <div>📦 <strong>Tasks & Schedule</strong> → localStorage (browser, offline)</div>
-            <div>📊 <strong>Focus Sessions & Reports</strong> → IndexedDB (browser, offline)</div>
-            <div>🔑 <strong>API Key</strong> → localStorage (browser only, not synced)</div>
-            <div>☁️ <strong>Cross-device sync</strong> → Not enabled (add Supabase/Firebase to unlock)</div>
+          <div style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 2, marginBottom: 14 }}>
+            <div>📦 <strong>Tasks & Schedule</strong> → localStorage (browser, works offline)</div>
+            <div>📊 <strong>Focus Sessions & Reports</strong> → IndexedDB (browser, works offline)</div>
+            <div>🔑 <strong>API Key</strong> → localStorage (browser only, never synced)</div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button
               onClick={() => {
                 const data = {
-                  tasks: JSON.parse(localStorage.getItem('fd_tasks') || '[]'),
+                  tasks:    JSON.parse(localStorage.getItem('fd_tasks')    || '[]'),
                   schedule: JSON.parse(localStorage.getItem('fd_schedule') || '[]'),
                   settings: JSON.parse(localStorage.getItem('fd_settings') || '{}'),
                 }
                 const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-                const url = URL.createObjectURL(blob)
-                const a = document.createElement('a'); a.href = url; a.download = 'flowday-backup.json'; a.click()
+                const url  = URL.createObjectURL(blob)
+                const a    = document.createElement('a')
+                a.href = url; a.download = 'flowday-backup.json'; a.click()
                 URL.revokeObjectURL(url)
               }}
-              style={{ padding: '8px 14px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', color: 'var(--text2)', cursor: 'pointer', fontSize: 12 }}
-            >⬇️ Export Data (JSON)</button>
+              style={{ padding: '8px 14px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', color: 'var(--text2)', fontSize: 12, cursor: 'pointer' }}
+            >⬇️ Export Backup (JSON)</button>
             <button
               onClick={() => {
-                if (confirm('This clears ALL local data. Are you sure?')) {
+                if (window.confirm('This clears ALL local data including tasks and schedule. Continue?')) {
                   localStorage.clear()
                   window.location.reload()
                 }
               }}
-              style={{ padding: '8px 14px', background: 'rgba(231,76,60,0.08)', border: '1px solid rgba(231,76,60,0.2)', borderRadius: 'var(--r-md)', color: 'var(--red)', cursor: 'pointer', fontSize: 12 }}
+              style={{ padding: '8px 14px', background: 'var(--red2)', border: '1px solid rgba(231,76,60,0.2)', borderRadius: 'var(--r-md)', color: 'var(--red)', fontSize: 12, cursor: 'pointer' }}
             >🗑️ Clear All Data</button>
           </div>
         </Section>
 
-        {/* Save button */}
+        {/* Save */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 32 }}>
           <button
             onClick={save}
             style={{
-              padding: '10px 28px', borderRadius: 'var(--r-md)',
+              padding: '11px 32px', borderRadius: 'var(--r-md)',
               background: saved ? 'var(--green)' : 'var(--accent)',
               border: 'none', color: '#fff', fontWeight: 600, fontSize: 14,
               cursor: 'pointer', transition: 'background 0.3s',

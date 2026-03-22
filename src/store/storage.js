@@ -87,7 +87,7 @@ const DEFAULT_SETTINGS = {
   pomodoroLongBreak: 15,
   pomodoroSessions: 4,
   notificationsEnabled: true,
-  claudeApiKey: '', // user sets this for AI features
+  geminiApiKey: '', // Google Gemini API key (free tier)
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

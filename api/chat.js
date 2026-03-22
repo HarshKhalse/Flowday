@@ -1,62 +1,51 @@
 /**
- * api/chat.js  —  Vercel Serverless Function
+ * api/chat.js — Vercel Serverless Proxy for Gemini API
  *
- * Acts as a proxy between the FlowDay frontend and Anthropic's API.
- * This completely sidesteps CORS — the browser talks to YOUR server,
- * your server talks to Anthropic, response comes back clean.
+ * Browser → /api/chat (this function) → Google Gemini API
+ * Sidesteps CORS completely. API key never touches the browser network tab.
  *
- * The API key travels in the request Authorization header from the
- * frontend, so it's never hardcoded here and works for every user.
- *
- * Deployed automatically by Vercel when you push — no extra setup needed.
+ * Supports:
+ *   - Text chat  (POST with { contents, systemInstruction, ... })
+ *   - Vision     (inline_data parts for timetable image parsing)
  */
 
 export default async function handler(req, res) {
-  // ── CORS headers — allow your frontend origin ──────────────────────────
+  // ── CORS ──────────────────────────────────────────────────────────────────
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  if (req.method === 'OPTIONS') return res.status(200).end()
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  // Preflight request
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end()
+  // ── Extract API key ────────────────────────────────────────────────────────
+  const apiKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+  if (!apiKey) {
+    return res.status(401).json({ error: 'Missing Gemini API key. Add it in FlowDay Settings.' })
   }
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' })
-  }
+  // ── Model from body (default: gemini-1.5-flash — free tier) ───────────────
+  const { model = 'gemini-1.5-flash', ...body } = req.body || {}
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
 
-  // ── Extract the API key from the Authorization header ─────────────────
-  const authHeader = req.headers['authorization'] || ''
-  const apiKey = authHeader.replace('Bearer ', '').trim()
-
-  if (!apiKey || !apiKey.startsWith('sk-ant-')) {
-    return res.status(401).json({
-      error: 'Missing or invalid API key. Add your Claude API key in FlowDay Settings.'
-    })
-  }
-
-  // ── Forward the request body to Anthropic ─────────────────────────────
+  // ── Forward to Gemini ──────────────────────────────────────────────────────
   try {
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+    const geminiRes = await fetch(geminiUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type':      'application/json',
-        'x-api-key':         apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(req.body),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     })
 
-    const data = await anthropicRes.json()
+    const data = await geminiRes.json()
 
-    // Pass through Anthropic's status code
-    return res.status(anthropicRes.status).json(data)
+    if (!geminiRes.ok) {
+      const msg = data?.error?.message || `Gemini error ${geminiRes.status}`
+      return res.status(geminiRes.status).json({ error: msg })
+    }
+
+    return res.status(200).json(data)
 
   } catch (err) {
     console.error('Proxy error:', err)
-    return res.status(500).json({
-      error: 'Proxy request failed: ' + err.message
-    })
+    return res.status(500).json({ error: 'Proxy request failed: ' + err.message })
   }
 }

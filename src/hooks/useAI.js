@@ -1,19 +1,28 @@
 /**
- * useAI.js
+ * useAI.js — Gemini API integration for FlowDay
  *
- * All Claude API calls go through /api/chat  (a local Vite proxy in dev,
- * a Vercel serverless function in production).  This completely avoids
- * CORS errors — the browser never talks to api.anthropic.com directly.
+ * Uses Google Gemini 1.5 Flash (FREE tier):
+ *   - 15 requests/minute
+ *   - 1 million tokens/day
+ *   - $0 cost for students
  *
- * Falls back to rule-based responses when no API key is set, so the app
- * still works offline / without a key.
+ * All requests go through /api/chat (Vercel serverless proxy in prod,
+ * Vite dev proxy locally) to avoid CORS errors.
+ *
+ * Falls back to rule-based responses when no API key is set.
  */
 
 import { useState, useCallback } from 'react'
-import { getSettings, addTask, addScheduleItem, deleteTask, updateScheduleItem, getSchedule, getTasks } from '../store/storage'
+import {
+  getSettings, addTask, addScheduleItem,
+  deleteTask, updateScheduleItem, getSchedule, getTasks
+} from '../store/storage'
 
-// ── System prompt ────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are FlowDay AI, a smart scheduling assistant for an engineering student named Harsh.
+// ── Gemini model to use (free tier) ─────────────────────────────────────────
+const GEMINI_MODEL = 'gemini-1.5-flash'
+
+// ── System instruction for Gemini ────────────────────────────────────────────
+const SYSTEM_INSTRUCTION = `You are FlowDay AI, a smart scheduling assistant for an engineering student named Harsh.
 You help manage their daily schedule, tasks, Pomodoro sessions, and reminders.
 
 You can:
@@ -24,69 +33,87 @@ You can:
 - Suggest Pomodoro sessions for tasks
 - Answer questions about the schedule
 
-Always respond in JSON with this exact structure (no markdown, no extra text):
+IMPORTANT: Always respond with ONLY a valid JSON object. No markdown, no code fences, no explanation text outside the JSON.
+
+Response format:
 {
-  "message": "friendly reply to show the user",
+  "message": "friendly reply to show the user (warm, concise, max 2 emojis)",
   "action": null,
   "data": {}
 }
 
-action can be: null | "add_task" | "add_schedule" | "delete_task" | "reschedule" | "start_pomodoro" | "none"
+action values: null | "add_task" | "add_schedule" | "delete_task" | "reschedule" | "start_pomodoro" | "none"
 
-For add_task data: { title, due, dueDate (YYYY-MM-DD or ""), priority, tag }
-For add_schedule data: { title, time (HH:MM 24h), end (HH:MM 24h), type, room, priority, color (#hex) }
-For delete_task data: { titleHint }
-For reschedule data: { titleHint, newTime (HH:MM), newEnd (HH:MM) }
-For start_pomodoro data: { taskName }
-
-Keep messages warm, concise, encouraging. Use 1-2 emojis max.`
+For add_task: data = { title, due (human readable), dueDate (YYYY-MM-DD or ""), priority, tag }
+For add_schedule: data = { title, time (HH:MM 24h), end (HH:MM 24h), type, room, priority, color (#hex) }
+For delete_task: data = { titleHint }
+For reschedule: data = { titleHint, newTime (HH:MM), newEnd (HH:MM) }
+For start_pomodoro: data = { taskName }`
 
 // ── Rule-based offline fallback ───────────────────────────────────────────────
 function ruleBasedResponse(text) {
   const t = text.toLowerCase()
   if ((t.includes('add') || t.includes('create')) && t.includes('task'))
-    return { message: "I'd love to add that! Enable full AI by adding your Claude API key in Settings ⚙️. For now, use the + button in the Tasks tab.", action: 'none', data: {} }
-  if (t.includes('reschedule') || t.includes('move') || t.includes('change time'))
-    return { message: "Add your Claude API key in Settings to enable schedule editing via chat. You can also edit items directly on the schedule.", action: 'none', data: {} }
+    return { message: "Add your Gemini API key in Settings to enable full AI. For now, use the + button in the Tasks tab! 📝", action: 'none', data: {} }
+  if (t.includes('reschedule') || t.includes('move') || t.includes('change'))
+    return { message: "Add your Gemini API key in Settings to edit your schedule via chat.", action: 'none', data: {} }
   if (t.includes('pomodoro') || t.includes('focus') || t.includes('timer') || t.includes('start'))
     return { message: "Head to the 🍅 Pomodoro tab, pick your task and hit play. You've got this!", action: 'start_pomodoro', data: {} }
   if (t.includes('remind'))
-    return { message: "Make sure browser notifications are allowed — I'll ping you at session ends and deadlines. 🔔", action: 'none', data: {} }
+    return { message: "Make sure browser notifications are allowed and I'll ping you at session ends! 🔔", action: 'none', data: {} }
   if (t.includes('hello') || t.includes('hi') || t.includes('hey'))
-    return { message: "Hey Harsh! 👋 Ready to crush today? Add your API key in Settings for full AI scheduling.", action: 'none', data: {} }
+    return { message: "Hey Harsh! 👋 Add your Gemini API key in Settings for full AI scheduling powers.", action: 'none', data: {} }
   if (t.includes('delete') || t.includes('remove') || t.includes('cancel'))
-    return { message: "Use the ✕ button on any task to delete it, or add your Claude API key for voice/chat control.", action: 'none', data: {} }
+    return { message: "Use the ✕ on any task to delete it, or add your Gemini API key for voice/chat control.", action: 'none', data: {} }
   if (t.includes('schedule') || t.includes('today') || t.includes('lecture'))
-    return { message: "Check the Today tab for your full schedule! Your lectures and tasks are laid out with priority colors. 📅", action: 'none', data: {} }
-  if (t.includes('report') || t.includes('stats') || t.includes('progress'))
-    return { message: "Head to the 📊 Reports tab to see your weekly focus chart, heatmap, and achievements!", action: 'none', data: {} }
-  return { message: `Got it! Add your Claude API key in Settings ⚙️ to unlock full AI — I'll be able to act on "${text}" instantly.`, action: 'none', data: {} }
+    return { message: "Check the Today tab for your full schedule with priority colors! 📅", action: 'none', data: {} }
+  if (t.includes('report') || t.includes('stats'))
+    return { message: "Head to the 📊 Reports tab to see your weekly chart and heatmap!", action: 'none', data: {} }
+  return { message: `Add your Gemini API key in Settings ⚙️ to unlock full AI — I'll act on "${text}" instantly.`, action: 'none', data: {} }
 }
 
-// ── Proxy URL — same path works in dev (Vite proxy) and prod (Vercel fn) ─────
-const PROXY_URL = '/api/chat'
+// ── Call Gemini through the proxy ─────────────────────────────────────────────
+async function callGemini(apiKey, contents, systemInstruction = null) {
+  const body = {
+    model: GEMINI_MODEL,
+    contents,
+    generationConfig: {
+      temperature:     0.3,   // lower = more predictable JSON output
+      maxOutputTokens: 1024,
+      responseMimeType: 'application/json', // tell Gemini to return JSON directly
+    },
+  }
 
-// ── Call the proxy ────────────────────────────────────────────────────────────
-async function callClaude(apiKey, body) {
-  const res = await fetch(PROXY_URL, {
+  if (systemInstruction) {
+    body.systemInstruction = { parts: [{ text: systemInstruction }] }
+  }
+
+  const res = await fetch('/api/chat', {
     method: 'POST',
     headers: {
       'Content-Type':  'application/json',
-      'Authorization': `Bearer ${apiKey}`,   // proxy extracts this → x-api-key
+      'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
   })
 
+  const data = await res.json()
+
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    // Surface a friendly message for common errors
-    if (res.status === 401) throw new Error('Invalid API key — double-check it in Settings.')
-    if (res.status === 429) throw new Error('Rate limit hit. Wait a moment and try again.')
-    if (res.status === 529) throw new Error('Anthropic servers overloaded. Try again shortly.')
-    throw new Error(err.error?.message || `API error ${res.status}`)
+    // Surface friendly errors
+    const msg = data?.error || 'Unknown error'
+    if (res.status === 400 && msg.includes('API_KEY')) throw new Error('Invalid Gemini API key — check it in Settings.')
+    if (res.status === 429) throw new Error('Rate limit hit (15 req/min on free tier). Wait a moment.')
+    if (res.status === 403) throw new Error('API key blocked or quota exceeded. Check Google AI Studio.')
+    throw new Error(msg)
   }
 
-  return res.json()
+  return data
+}
+
+// ── Extract text from Gemini response ────────────────────────────────────────
+function extractText(data) {
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
 }
 
 // ── Main hook ─────────────────────────────────────────────────────────────────
@@ -97,44 +124,45 @@ export function useAI() {
     setLoading(true)
     try {
       const settings = getSettings()
-      const apiKey   = settings.claudeApiKey?.trim()
+      const apiKey   = settings.geminiApiKey?.trim()
 
       // No key → offline rule-based
       if (!apiKey) {
-        await new Promise(r => setTimeout(r, 500))
+        await new Promise(r => setTimeout(r, 400))
         return ruleBasedResponse(userMessage)
       }
 
-      // Build a context snippet so Claude knows current state
+      // Build context so Gemini knows current schedule/tasks
       const tasks    = getTasks().filter(t => !t.done).slice(0, 8)
       const schedule = getSchedule().slice(0, 6)
-      const context  = `Current pending tasks: ${tasks.map(t => t.title).join(', ') || 'none'}. Today's schedule has ${schedule.length} items.`
+      const context  = `Pending tasks: ${tasks.map(t => `"${t.title}" (${t.priority})`).join(', ') || 'none'}. Schedule has ${schedule.length} items today.`
 
-      const data = await callClaude(apiKey, {
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system:     SYSTEM_PROMPT,
-        messages: [
-          { role: 'user', content: `Context: ${context}\n\nUser message: ${userMessage}` }
-        ],
-      })
+      const contents = [{
+        role: 'user',
+        parts: [{ text: `Context: ${context}\n\nUser: ${userMessage}` }]
+      }]
 
-      const raw   = data.content?.[0]?.text || '{}'
-      const clean = raw.replace(/```json|```/g, '').trim()
+      const data = await callGemini(apiKey, contents, SYSTEM_INSTRUCTION)
+      const raw  = extractText(data)
+
+      // Parse JSON — Gemini with responseMimeType:'application/json' returns clean JSON
+      const clean  = raw.replace(/```json|```/g, '').trim()
       const result = JSON.parse(clean)
 
-      // Execute the action
+      // ── Execute action ─────────────────────────────────────────────────
       if (result.action === 'add_task' && result.data?.title) {
         addTask(result.data)
       } else if (result.action === 'add_schedule' && result.data?.title) {
         addScheduleItem({ ...result.data, color: result.data.color || '#7c6af5' })
       } else if (result.action === 'delete_task' && result.data?.titleHint) {
-        const tasks = getTasks()
-        const match = tasks.find(t => t.title.toLowerCase().includes(result.data.titleHint.toLowerCase()))
+        const match = getTasks().find(t =>
+          t.title.toLowerCase().includes(result.data.titleHint.toLowerCase())
+        )
         if (match) deleteTask(match.id)
       } else if (result.action === 'reschedule' && result.data?.titleHint) {
-        const sched = getSchedule()
-        const match = sched.find(s => s.title.toLowerCase().includes(result.data.titleHint.toLowerCase()))
+        const match = getSchedule().find(s =>
+          s.title.toLowerCase().includes(result.data.titleHint.toLowerCase())
+        )
         if (match) updateScheduleItem(match.id, { time: result.data.newTime, end: result.data.newEnd })
       }
 
@@ -142,10 +170,7 @@ export function useAI() {
 
     } catch (err) {
       console.error('AI error:', err)
-      return {
-        message: `⚠️ ${err.message}`,
-        action: 'none', data: {}
-      }
+      return { message: `⚠️ ${err.message}`, action: 'none', data: {} }
     } finally {
       setLoading(false)
     }
@@ -156,59 +181,80 @@ export function useAI() {
     setLoading(true)
     try {
       const settings = getSettings()
-      const apiKey   = settings.claudeApiKey?.trim()
+      const apiKey   = settings.geminiApiKey?.trim()
 
-      // Demo mode — no key
+      // Demo mode
       if (!apiKey) {
         await new Promise(r => setTimeout(r, 1500))
         return {
           success: true,
           schedule: [
-            { title: 'Mathematics',    time: '08:00', end: '09:00', type: 'lecture', room: 'LH-1', priority: 'medium', color: '#3498db' },
-            { title: 'Physics Lab',    time: '09:15', end: '11:15', type: 'lecture', room: 'Physics Lab', priority: 'medium', color: '#3498db' },
-            { title: 'Data Structures',time: '11:30', end: '12:30', type: 'lecture', room: 'LH-3', priority: 'medium', color: '#3498db' },
+            { title: 'Mathematics',     time: '08:00', end: '09:00', type: 'lecture', room: 'LH-1',        priority: 'medium', color: '#3498db' },
+            { title: 'Physics Lab',     time: '09:15', end: '11:15', type: 'lecture', room: 'Physics Lab', priority: 'medium', color: '#3498db' },
+            { title: 'Data Structures', time: '11:30', end: '12:30', type: 'lecture', room: 'LH-3',        priority: 'medium', color: '#3498db' },
           ],
-          message: 'Demo timetable loaded! Add your Claude API key in Settings to parse your real timetable.',
+          message: 'Demo timetable loaded! Add your Gemini API key in Settings to parse your real timetable.',
         }
       }
 
-      // Convert to base64
-      const base64 = await new Promise((res, rej) => {
+      // Convert file to base64
+      const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader()
-        reader.onload  = () => res(reader.result.split(',')[1])
-        reader.onerror = rej
+        reader.onload  = () => resolve(reader.result.split(',')[1])
+        reader.onerror = reject
         reader.readAsDataURL(file)
       })
 
-      const mediaType = file.type || 'image/jpeg'
-      const isImage   = mediaType.startsWith('image/')
+      const mimeType = file.type || 'image/jpeg'
 
-      const data = await callClaude(apiKey, {
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 2000,
-        messages: [{
-          role: 'user',
-          content: [
-            isImage
-              ? { type: 'image',    source: { type: 'base64', media_type: mediaType,          data: base64 } }
-              : { type: 'document', source: { type: 'base64', media_type: 'application/pdf',  data: base64 } },
-            {
-              type: 'text',
-              text: `Extract every lecture, lab, and class from this timetable. Return ONLY a JSON array, no other text:
-[{ "title": "Subject Name", "time": "HH:MM", "end": "HH:MM", "type": "lecture", "room": "room or empty string", "priority": "medium", "color": "#3498db", "day": "daily" }]
-Use 24-hour time. Be thorough — extract every entry visible.`
+      // Gemini vision: inline_data part
+      const contents = [{
+        role: 'user',
+        parts: [
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data:      base64,
             }
-          ]
-        }],
-      })
+          },
+          {
+            text: `Extract every lecture, lab, tutorial, and class from this college timetable image.
+Return ONLY a valid JSON array with no other text:
+[
+  {
+    "title": "Subject Name",
+    "time": "HH:MM",
+    "end": "HH:MM",
+    "type": "lecture",
+    "room": "room number or empty string",
+    "priority": "medium",
+    "color": "#3498db",
+    "day": "daily"
+  }
+]
+Use 24-hour time format. Extract every single entry visible. If a subject appears multiple days, include one entry per day with the correct day field (Mon/Tue/Wed/Thu/Fri/Sat).`
+          }
+        ]
+      }]
 
-      const raw      = data.content?.[0]?.text || '[]'
+      const data = await callGemini(apiKey, contents)
+      const raw  = extractText(data)
+
       const clean    = raw.replace(/```json|```/g, '').trim()
       const schedule = JSON.parse(clean)
-      return { success: true, schedule, message: `Found ${schedule.length} classes in your timetable! 🎉` }
+
+      return {
+        success: true,
+        schedule,
+        message: `Found ${schedule.length} classes in your timetable! 🎉`,
+      }
 
     } catch (err) {
-      return { success: false, schedule: [], message: `Parse failed: ${err.message}` }
+      return {
+        success: false,
+        schedule: [],
+        message: `Parse failed: ${err.message}`,
+      }
     } finally {
       setLoading(false)
     }
