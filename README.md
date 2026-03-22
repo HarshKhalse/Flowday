@@ -69,7 +69,7 @@ FlowDay is built differently. It understands your schedule in natural language, 
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/flowday.git
+git clone https://github.com/HarshKhalse/Flowday.git
 cd flowday
 
 # 2. Install dependencies

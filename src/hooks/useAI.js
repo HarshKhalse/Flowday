@@ -1,17 +1,18 @@
 /**
  * useAI.js
- * Handles all Claude API interactions:
- *  1. Chat assistant (schedule changes, task management)
- *  2. Timetable image/PDF parsing
  *
- * Falls back to rule-based responses when no API key is set,
- * so the app still works fully offline / without a key.
+ * All Claude API calls go through /api/chat  (a local Vite proxy in dev,
+ * a Vercel serverless function in production).  This completely avoids
+ * CORS errors — the browser never talks to api.anthropic.com directly.
+ *
+ * Falls back to rule-based responses when no API key is set, so the app
+ * still works offline / without a key.
  */
 
 import { useState, useCallback } from 'react'
-import { getSettings, addTask, addScheduleItem, deleteTask, updateScheduleItem } from '../store/storage'
+import { getSettings, addTask, addScheduleItem, deleteTask, updateScheduleItem, getSchedule, getTasks } from '../store/storage'
 
-// ── System prompt for the AI assistant ──────────────────────────────────────
+// ── System prompt ────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are FlowDay AI, a smart scheduling assistant for an engineering student named Harsh.
 You help manage their daily schedule, tasks, Pomodoro sessions, and reminders.
 
@@ -23,46 +24,69 @@ You can:
 - Suggest Pomodoro sessions for tasks
 - Answer questions about the schedule
 
-Always respond in JSON with this structure:
+Always respond in JSON with this exact structure (no markdown, no extra text):
 {
   "message": "friendly reply to show the user",
-  "action": null | "add_task" | "add_schedule" | "delete_task" | "reschedule" | "start_pomodoro" | "none",
-  "data": {} // action-specific data
+  "action": null,
+  "data": {}
 }
 
+action can be: null | "add_task" | "add_schedule" | "delete_task" | "reschedule" | "start_pomodoro" | "none"
+
 For add_task data: { title, due, dueDate (YYYY-MM-DD or ""), priority, tag }
-For add_schedule data: { title, time (HH:MM), end (HH:MM), type, room, priority, color }
-For delete_task data: { titleHint } (partial match)
+For add_schedule data: { title, time (HH:MM 24h), end (HH:MM 24h), type, room, priority, color (#hex) }
+For delete_task data: { titleHint }
 For reschedule data: { titleHint, newTime (HH:MM), newEnd (HH:MM) }
 For start_pomodoro data: { taskName }
 
-Keep messages warm, concise, and encouraging. Use 1-2 emojis max.`
+Keep messages warm, concise, encouraging. Use 1-2 emojis max.`
 
-// ── Offline / no-key rule-based responses ────────────────────────────────────
+// ── Rule-based offline fallback ───────────────────────────────────────────────
 function ruleBasedResponse(text) {
   const t = text.toLowerCase()
-  if ((t.includes('add') || t.includes('create')) && t.includes('task')) {
-    return { message: "I'd love to add that task! Set your Claude API key in Settings to enable full AI. For now, use the + button in Tasks to add it manually.", action: 'none', data: {} }
+  if ((t.includes('add') || t.includes('create')) && t.includes('task'))
+    return { message: "I'd love to add that! Enable full AI by adding your Claude API key in Settings ⚙️. For now, use the + button in the Tasks tab.", action: 'none', data: {} }
+  if (t.includes('reschedule') || t.includes('move') || t.includes('change time'))
+    return { message: "Add your Claude API key in Settings to enable schedule editing via chat. You can also edit items directly on the schedule.", action: 'none', data: {} }
+  if (t.includes('pomodoro') || t.includes('focus') || t.includes('timer') || t.includes('start'))
+    return { message: "Head to the 🍅 Pomodoro tab, pick your task and hit play. You've got this!", action: 'start_pomodoro', data: {} }
+  if (t.includes('remind'))
+    return { message: "Make sure browser notifications are allowed — I'll ping you at session ends and deadlines. 🔔", action: 'none', data: {} }
+  if (t.includes('hello') || t.includes('hi') || t.includes('hey'))
+    return { message: "Hey Harsh! 👋 Ready to crush today? Add your API key in Settings for full AI scheduling.", action: 'none', data: {} }
+  if (t.includes('delete') || t.includes('remove') || t.includes('cancel'))
+    return { message: "Use the ✕ button on any task to delete it, or add your Claude API key for voice/chat control.", action: 'none', data: {} }
+  if (t.includes('schedule') || t.includes('today') || t.includes('lecture'))
+    return { message: "Check the Today tab for your full schedule! Your lectures and tasks are laid out with priority colors. 📅", action: 'none', data: {} }
+  if (t.includes('report') || t.includes('stats') || t.includes('progress'))
+    return { message: "Head to the 📊 Reports tab to see your weekly focus chart, heatmap, and achievements!", action: 'none', data: {} }
+  return { message: `Got it! Add your Claude API key in Settings ⚙️ to unlock full AI — I'll be able to act on "${text}" instantly.`, action: 'none', data: {} }
+}
+
+// ── Proxy URL — same path works in dev (Vite proxy) and prod (Vercel fn) ─────
+const PROXY_URL = '/api/chat'
+
+// ── Call the proxy ────────────────────────────────────────────────────────────
+async function callClaude(apiKey, body) {
+  const res = await fetch(PROXY_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,   // proxy extracts this → x-api-key
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    // Surface a friendly message for common errors
+    if (res.status === 401) throw new Error('Invalid API key — double-check it in Settings.')
+    if (res.status === 429) throw new Error('Rate limit hit. Wait a moment and try again.')
+    if (res.status === 529) throw new Error('Anthropic servers overloaded. Try again shortly.')
+    throw new Error(err.error?.message || `API error ${res.status}`)
   }
-  if (t.includes('reschedule') || t.includes('move')) {
-    return { message: "Rescheduling works with the Claude API enabled. You can drag tasks in the schedule view, or set your API key in Settings for voice/chat control!", action: 'none', data: {} }
-  }
-  if (t.includes('pomodoro') || t.includes('focus') || t.includes('timer')) {
-    return { message: "Head to the Pomodoro tab to start a focus session! Pick your task, hit play, and crush it. 🍅", action: 'start_pomodoro', data: {} }
-  }
-  if (t.includes('remind')) {
-    return { message: "Reminder noted! Browser notifications are enabled — make sure you've allowed them. I'll ping you before your next deadline.", action: 'none', data: {} }
-  }
-  if (t.includes('hello') || t.includes('hi') || t.includes('hey')) {
-    return { message: "Hey Harsh! Ready to crush today? You've got 6 tasks and 2 lectures. Want me to walk you through your day?", action: 'none', data: {} }
-  }
-  if (t.includes('cancel') || t.includes('delete') || t.includes('remove')) {
-    return { message: "To delete items you can swipe left on tasks, or enable the Claude API in Settings for voice commands like 'remove my 3pm session'.", action: 'none', data: {} }
-  }
-  if (t.includes('free') || t.includes('gap') || t.includes('break')) {
-    return { message: "You have a free slot 12:00–1:00 PM today. Perfect for a quick Pomodoro session or lunch! Want me to block it for study?", action: 'none', data: {} }
-  }
-  return { message: `Got it! For full AI scheduling magic, add your Claude API key in Settings. I understood: "${text}" — once connected I can act on that instantly.`, action: 'none', data: {} }
+
+  return res.json()
 }
 
 // ── Main hook ─────────────────────────────────────────────────────────────────
@@ -73,131 +97,116 @@ export function useAI() {
     setLoading(true)
     try {
       const settings = getSettings()
-      const apiKey = settings.claudeApiKey
+      const apiKey   = settings.claudeApiKey?.trim()
 
-      let result
-
+      // No key → offline rule-based
       if (!apiKey) {
-        // Offline / no-key: rule-based
-        await new Promise(r => setTimeout(r, 600)) // realistic delay
-        result = ruleBasedResponse(userMessage)
-      } else {
-        // Live Claude API call
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1000,
-            system: SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: userMessage }],
-          }),
-        })
-
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}))
-          throw new Error(err.error?.message || `API error ${response.status}`)
-        }
-
-        const data = await response.json()
-        const raw = data.content?.[0]?.text || '{}'
-        // Strip markdown code fences if present
-        const clean = raw.replace(/```json|```/g, '').trim()
-        result = JSON.parse(clean)
+        await new Promise(r => setTimeout(r, 500))
+        return ruleBasedResponse(userMessage)
       }
 
-      // Execute action
+      // Build a context snippet so Claude knows current state
+      const tasks    = getTasks().filter(t => !t.done).slice(0, 8)
+      const schedule = getSchedule().slice(0, 6)
+      const context  = `Current pending tasks: ${tasks.map(t => t.title).join(', ') || 'none'}. Today's schedule has ${schedule.length} items.`
+
+      const data = await callClaude(apiKey, {
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system:     SYSTEM_PROMPT,
+        messages: [
+          { role: 'user', content: `Context: ${context}\n\nUser message: ${userMessage}` }
+        ],
+      })
+
+      const raw   = data.content?.[0]?.text || '{}'
+      const clean = raw.replace(/```json|```/g, '').trim()
+      const result = JSON.parse(clean)
+
+      // Execute the action
       if (result.action === 'add_task' && result.data?.title) {
         addTask(result.data)
       } else if (result.action === 'add_schedule' && result.data?.title) {
         addScheduleItem({ ...result.data, color: result.data.color || '#7c6af5' })
       } else if (result.action === 'delete_task' && result.data?.titleHint) {
-        const { getTasks } = await import('../store/storage')
         const tasks = getTasks()
         const match = tasks.find(t => t.title.toLowerCase().includes(result.data.titleHint.toLowerCase()))
         if (match) deleteTask(match.id)
       } else if (result.action === 'reschedule' && result.data?.titleHint) {
-        const { getSchedule } = await import('../store/storage')
-        const schedule = getSchedule()
-        const match = schedule.find(s => s.title.toLowerCase().includes(result.data.titleHint.toLowerCase()))
+        const sched = getSchedule()
+        const match = sched.find(s => s.title.toLowerCase().includes(result.data.titleHint.toLowerCase()))
         if (match) updateScheduleItem(match.id, { time: result.data.newTime, end: result.data.newEnd })
       }
 
       return result
+
     } catch (err) {
       console.error('AI error:', err)
-      return { message: `Something went wrong: ${err.message}. Check your API key in Settings.`, action: 'none', data: {} }
+      return {
+        message: `⚠️ ${err.message}`,
+        action: 'none', data: {}
+      }
     } finally {
       setLoading(false)
     }
   }, [])
 
-  // Parse timetable image with Claude vision
+  // ── Timetable image / PDF parsing ─────────────────────────────────────────
   const parseTimetable = useCallback(async (file) => {
     setLoading(true)
     try {
       const settings = getSettings()
-      if (!settings.claudeApiKey) {
+      const apiKey   = settings.claudeApiKey?.trim()
+
+      // Demo mode — no key
+      if (!apiKey) {
         await new Promise(r => setTimeout(r, 1500))
-        // Return demo parsed schedule when no API key
         return {
           success: true,
           schedule: [
-            { title: 'Mathematics', time: '08:00', end: '09:00', type: 'lecture', room: 'LH-1', priority: 'medium', color: '#3498db' },
-            { title: 'Physics Lab', time: '09:15', end: '11:15', type: 'lecture', room: 'Physics Lab', priority: 'medium', color: '#3498db' },
-            { title: 'Data Structures', time: '11:30', end: '12:30', type: 'lecture', room: 'LH-3', priority: 'medium', color: '#3498db' },
+            { title: 'Mathematics',    time: '08:00', end: '09:00', type: 'lecture', room: 'LH-1', priority: 'medium', color: '#3498db' },
+            { title: 'Physics Lab',    time: '09:15', end: '11:15', type: 'lecture', room: 'Physics Lab', priority: 'medium', color: '#3498db' },
+            { title: 'Data Structures',time: '11:30', end: '12:30', type: 'lecture', room: 'LH-3', priority: 'medium', color: '#3498db' },
           ],
-          message: 'Demo timetable loaded! Add your Claude API key in Settings to parse your real timetable image.',
+          message: 'Demo timetable loaded! Add your Claude API key in Settings to parse your real timetable.',
         }
       }
 
-      // Convert file to base64
+      // Convert to base64
       const base64 = await new Promise((res, rej) => {
         const reader = new FileReader()
-        reader.onload = () => res(reader.result.split(',')[1])
+        reader.onload  = () => res(reader.result.split(',')[1])
         reader.onerror = rej
         reader.readAsDataURL(file)
       })
 
-      const mediaType = file.type === 'application/pdf' ? 'application/pdf' : file.type || 'image/jpeg'
-      const isImage = mediaType.startsWith('image/')
+      const mediaType = file.type || 'image/jpeg'
+      const isImage   = mediaType.startsWith('image/')
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': settings.claudeApiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          messages: [{
-            role: 'user',
-            content: [
-              isImage
-                ? { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } }
-                : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-              {
-                type: 'text',
-                text: `Extract all lectures, labs, and classes from this timetable image. Return ONLY a JSON array of schedule items with NO extra text:
-[{ "title": "Subject Name", "time": "HH:MM", "end": "HH:MM", "type": "lecture", "room": "room number or empty string", "priority": "medium", "color": "#3498db", "day": "daily" or "Mon/Tue/..." }]
-Use 24h time. type should be "lecture" for classes and labs. Be thorough and extract every entry.`
-              }
-            ]
-          }],
-        }),
+      const data = await callClaude(apiKey, {
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        messages: [{
+          role: 'user',
+          content: [
+            isImage
+              ? { type: 'image',    source: { type: 'base64', media_type: mediaType,          data: base64 } }
+              : { type: 'document', source: { type: 'base64', media_type: 'application/pdf',  data: base64 } },
+            {
+              type: 'text',
+              text: `Extract every lecture, lab, and class from this timetable. Return ONLY a JSON array, no other text:
+[{ "title": "Subject Name", "time": "HH:MM", "end": "HH:MM", "type": "lecture", "room": "room or empty string", "priority": "medium", "color": "#3498db", "day": "daily" }]
+Use 24-hour time. Be thorough — extract every entry visible.`
+            }
+          ]
+        }],
       })
 
-      const data = await response.json()
-      const raw = data.content?.[0]?.text || '[]'
-      const clean = raw.replace(/```json|```/g, '').trim()
+      const raw      = data.content?.[0]?.text || '[]'
+      const clean    = raw.replace(/```json|```/g, '').trim()
       const schedule = JSON.parse(clean)
-      return { success: true, schedule, message: `Found ${schedule.length} classes in your timetable!` }
+      return { success: true, schedule, message: `Found ${schedule.length} classes in your timetable! 🎉` }
+
     } catch (err) {
       return { success: false, schedule: [], message: `Parse failed: ${err.message}` }
     } finally {

@@ -21,11 +21,9 @@ export default defineConfig({
         ]
       },
       workbox: {
-        // Cache all assets for offline use
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {
-            // Cache Google Fonts offline
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
             handler: 'CacheFirst',
             options: {
@@ -44,5 +42,31 @@ export default defineConfig({
         ]
       }
     })
-  ]
+  ],
+
+  server: {
+    // ── Dev proxy: forwards /api/chat → Anthropic directly ──────────────
+    // This mirrors what the Vercel serverless function does in production,
+    // so local dev (npm run dev) and deployed Vercel both work identically.
+    proxy: {
+      '/api/chat': {
+        target: 'https://api.anthropic.com',
+        changeOrigin: true,
+        rewrite: () => '/v1/messages',
+        configure: (proxy) => {
+          // The proxy rewrites headers so Anthropic receives x-api-key
+          proxy.on('proxyReq', (proxyReq, req) => {
+            // Move Authorization: Bearer sk-ant-xxx → x-api-key: sk-ant-xxx
+            const auth = req.headers['authorization'] || ''
+            const key = auth.replace('Bearer ', '').trim()
+            if (key) {
+              proxyReq.setHeader('x-api-key', key)
+              proxyReq.setHeader('anthropic-version', '2023-06-01')
+              proxyReq.removeHeader('authorization')
+            }
+          })
+        }
+      }
+    }
+  }
 })
